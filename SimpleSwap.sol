@@ -8,11 +8,22 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 using SafeERC20 for IERC20;
 
-contract SimpleSwap is ERC20{
+/// @title SimpleSwap
+/// @author Nahuel Ruiz Mattar
+/// @notice A basic token swap contract that allows adding/removing liquidity and swapping between two tokens
+/// @dev This contract issues its own ERC20 token as liquidity representation
+contract SimpleSwap is ERC20 {
 
+    /// @dev Used to scale prices to 18 decimals (standard for ERC20)
     uint constant DECIMALS_FACTOR = 10**18;
-    uint constant MINIMUM_LIQUIDITY = 1000;    
-    bool locked;
+
+    /// @dev Minimum liquidity locked in the pool to avoid divide-by-zero scenarios. SwapVerifier do not contemplate this. So, I leave it with zero.
+    uint constant MINIMUM_LIQUIDITY = 0;
+
+    /// @dev Used for nonReentrancy modifier
+    bool private locked;
+
+    /// @dev Structure containing all necessary data for token pair operations
     struct TokenPairData {
         address tokenA;
         address tokenB;
@@ -20,15 +31,21 @@ contract SimpleSwap is ERC20{
         uint reserveB;
         uint amountA;
         uint amountB;
+        uint amountADesired;
+        uint amountBDesired;
+        uint amountAMin;
+        uint amountBMin;
         bool reversed;
     }
 
+    /// @notice Stores the reserve of each token pair
+    /// @dev reserve[tokenA][tokenB] = amount of tokenA reserved against tokenB
     mapping(address => mapping(address => uint)) public reserve;
 
-    constructor() ERC20("Liquidity Token ","LTK"){
-    }
-  
+    /// @notice Initializes the contract and sets token name/symbol
+    constructor() ERC20("Liquidity Token", "LTK") {}
 
+    /// @dev Prevents reentrancy by locking execution
     modifier nonReentrant() {
         require(!locked, "No reentrancy");
         locked = true;
@@ -36,272 +53,283 @@ contract SimpleSwap is ERC20{
         locked = false;
     }
 
-    modifier isNotExpired(uint deadline)
-    {
+    /// @dev Validates that current block timestamp is within deadline
+    modifier isNotExpired(uint deadline) {
         require(block.timestamp <= deadline, "Transaction expired");
         _;
     }
 
+    /// @notice Add liquidity to a new or existing token pair
+    /// @param tokenA Address of token A
+    /// @param tokenB Address of token B
+    /// @param amountADesired Amount of token A to add
+    /// @param amountBDesired Amount of token B to add
+    /// @param amountAMin Minimum amount of token A to accept
+    /// @param amountBMin Minimum amount of token B to accept
+    /// @param to Recipient of liquidity tokens
+    /// @param deadline Latest valid time for this transaction
+    /// @return amountA Actual amount of token A added
+    /// @return amountB Actual amount of token B added
+    /// @return liquidity Amount of liquidity tokens minted
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    )
+        external
+        nonReentrant
+        isNotExpired(deadline)
+        returns (uint amountA, uint amountB, uint liquidity)
+    {
+        require(amountADesired >= amountAMin, "amountADesired too low");
+        require(amountBDesired >= amountBMin, "amountBDesired too low");
 
-    function addLiquidity(  address tokenA, 
-                            address tokenB, 
-                            uint amountADesired, 
-                            uint amountBDesired, 
-                            uint amountAMin, 
-                            uint amountBMin, 
-                            address to, 
-                            uint deadline)
-                            external 
-                            nonReentrant() 
-                            isNotExpired(deadline) 
-                            returns (
-                                    uint amountA, 
-                                    uint amountB, 
-                                    uint liquidity)
-    {        
-       
-        require(amountADesired>=amountAMin,"amountAMin must be less than or equal to amountADesired");
-        require(amountBDesired>=amountBMin,"amountBMin must be less than or equal to amountBDesired");
-        
-        TokenPairData memory data = reorderTokens(tokenA,tokenB);
-    
-        data.reserveA = reserve[data.tokenA][data.tokenB];
-        data.reserveB = reserve[data.tokenB][data.tokenA];
+        // Normalize order of tokens and fetch current reserves
+        TokenPairData memory data = reorderTokens(tokenA, tokenB);
+        data.amountADesired = data.reversed ? amountBDesired : amountADesired;
+        data.amountBDesired = data.reversed ? amountADesired : amountBDesired;
+        data.amountAMin = data.reversed ? amountBMin : amountAMin;
+        data.amountBMin = data.reversed ? amountAMin : amountBMin;
 
         bool isInitialLiquidity = false;
 
-        require((data.reserveA == 0 && data.reserveB == 0) || (data.reserveA > 0 && data.reserveB > 0), "Invalid reserve amount");
+        // Ensure reserves are both zero (new pool) or both non-zero (existing pool)
+        require(
+            (data.reserveA == 0 && data.reserveB == 0) || (data.reserveA > 0 && data.reserveB > 0),
+            "Invalid reserve state"
+        );
 
-         if (data.reserveA==0 && data.reserveB==0)
-        {
-            data.amountA = amountADesired;
-            data.amountB = amountBDesired;
+        if (data.reserveA == 0 && data.reserveB == 0) {
+            // First liquidity in pool: accept desired amounts directly
+            data.amountA = data.amountADesired; 
+            data.amountB = data.amountBDesired; 
             isInitialLiquidity = true;
+            liquidity = calculateInitialLiquidity(data);
+        } else {
+            // Calculate optimal amounts based on current reserve ratio
+            data.amountB = data.amountBDesired;
+            data.amountA = (data.amountBDesired * data.reserveA) / data.reserveB;
 
-            liquidity = calculateInitialLiquidity(data);  
-
-        }
-        else 
-        {
-            data.amountB = amountBDesired;
-            data.amountA = amountBDesired * data.reserveA / data.reserveB;
-
-            if ((data.amountA < amountAMin) || (data.amountA > amountADesired))
-            {
-                data.amountA = amountADesired;
-                data.amountB = amountADesired * data.reserveB / data.reserveA;
+            // Check if amountA within acceptable range, otherwise adjust amountB
+            if (data.amountA < data.amountAMin || data.amountA > data.amountADesired) {
+                data.amountA = data.amountADesired;
+                data.amountB = (data.amountADesired * data.reserveB) / data.reserveA;
 
                 require(
-                        (data.amountB >= amountBMin)
-                        && 
-                        (data.amountB <= amountBDesired)
-                        ,"The output do not satisfy the input requirements");
-
+                    data.amountB >= amountBMin && data.amountB <= data.amountBDesired,
+                    "Amounts do not meet constraints"
+                );
             }
-            
+
             liquidity = calculateExistingLiquidity(data);
         }
 
+        // Transfer tokens and mint liquidity tokens
         addLiquidityTransact(msg.sender, to, data, liquidity, isInitialLiquidity);
 
-        amountA = data.amountA;
-        amountB = data.amountB;
-
-        return (amountA,amountB,liquidity);
-
+        amountA = data.reversed ? data.amountB : data.amountA;
+        amountB = data.reversed ? data.amountA : data.amountB;
     }
 
-    event LiquidityAdded (address indexed from, address indexed to, uint amountA, uint amountB, uint liquidity);
+    /// @notice Emitted when liquidity is added to the pool
+    event LiquidityAdded(address indexed from, address indexed to, uint amountA, uint amountB, uint liquidity);
 
-    function addLiquidityTransact ( address from,
-                                    address to,
-                                    TokenPairData memory data,
-                                    uint liquidity, 
-                                    bool isInitialLiquidity
-                                    ) internal
-    {
+    /// @dev Internal helper to handle token transfers and minting liquidity
+    function addLiquidityTransact(
+        address from,
+        address to,
+        TokenPairData memory data,
+        uint liquidity,
+        bool isInitialLiquidity
+    ) internal {
         IERC20(data.tokenA).safeTransferFrom(from, address(this), data.amountA);
         IERC20(data.tokenB).safeTransferFrom(from, address(this), data.amountB);
 
         _mint(to, liquidity);
 
-        if (isInitialLiquidity)
-        {
-            _mint(address(this), MINIMUM_LIQUIDITY); 
-        }      
+        if (isInitialLiquidity) {
+            _mint(address(this), MINIMUM_LIQUIDITY);
+        }
 
-        reserve[data.tokenA][data.tokenB]+=data.amountA;
-        reserve[data.tokenB][data.tokenA]+=data.amountB;        
+        reserve[data.tokenA][data.tokenB] += data.amountA;
+        reserve[data.tokenB][data.tokenA] += data.amountB;
 
-        emit LiquidityAdded (from, to, data.amountA, data.amountB, liquidity);
+        emit LiquidityAdded(from, to, data.amountA, data.amountB, liquidity);
     }
 
-    function calculateInitialLiquidity(TokenPairData memory data) internal pure returns (uint liquidity)
-    {
-            liquidity = sqrt(data.amountA*data.amountB) - MINIMUM_LIQUIDITY;
-            require(liquidity > 0,"The amounts must be higher");
+    /// @dev Computes liquidity to mint for new pool
+    function calculateInitialLiquidity(TokenPairData memory data) internal pure returns (uint liquidity) {
+        liquidity = sqrt(data.amountA * data.amountB) - MINIMUM_LIQUIDITY;
+        require(liquidity > 0, "Liquidity too low");
     }
 
-    function calculateExistingLiquidity(TokenPairData memory data) internal view returns (uint liquidity)
-    {
-            uint256 totalSupplyLTK = totalSupply();
-            uint256 liquidityA = data.amountA * totalSupplyLTK / data.reserveA;
-            uint256 liquidityB = data.amountB * totalSupplyLTK / data.reserveB;
-            liquidity = (liquidityA < liquidityB) ? liquidityA : liquidityB;
-        
+    /// @dev Computes liquidity for existing pool based on proportional contribution
+    function calculateExistingLiquidity(TokenPairData memory data) internal view returns (uint liquidity) {
+        uint256 totalSupplyLTK = totalSupply();
+        uint256 liquidityA = (data.amountA * totalSupplyLTK) / data.reserveA;
+        uint256 liquidityB = (data.amountB * totalSupplyLTK) / data.reserveB;
+        liquidity = liquidityA < liquidityB ? liquidityA : liquidityB;
     }
 
-    function removeLiquidity(   address tokenA, 
-                                address tokenB, 
-                                uint liquidity, 
-                                uint amountAMin, 
-                                uint amountBMin,
-                                address to, 
-                                uint deadline) 
-                                external 
-                                    nonReentrant() 
-                                    isNotExpired(deadline) 
-                                    returns (
-                                            uint amountA, 
-                                            uint amountB)
+    /// @notice Removes liquidity from the pool
+    /// @param tokenA Address of token A
+    /// @param tokenB Address of token B
+    /// @param liquidity Amount of liquidity tokens to burn
+    /// @param amountAMin Minimum amount of token A to receive
+    /// @param amountBMin Minimum amount of token B to receive
+    /// @param to Address to send the withdrawn tokens
+    /// @param deadline Latest valid time for this transaction
+    /// @return amountA Amount of token A returned
+    /// @return amountB Amount of token B returned
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    )
+        external
+        nonReentrant
+        isNotExpired(deadline)
+        returns (uint amountA, uint amountB)
     {
-        require(liquidity > 0, "Cannot remove zero liquidity");
-        
-        TokenPairData memory data = reorderTokens(tokenA,tokenB);
+        require(liquidity > 0, "Zero liquidity");
+
+        TokenPairData memory data = reorderTokens(tokenA, tokenB);
+        data.amountAMin = data.reversed ? amountBMin : amountAMin;
+        data.amountBMin = data.reversed ? amountAMin : amountBMin;
 
         uint256 totalSupplyLTK = totalSupply();
-        
-        data.amountA = liquidity*data.reserveA/totalSupplyLTK;
-        data.amountB = liquidity*data.reserveB/totalSupplyLTK;
 
-        require(data.amountA >= amountAMin,"amountA is lower than amountAMin");
-        require(data.amountB >= amountBMin,"amountB is lower than amountBMin");
+        data.amountA = (liquidity * data.reserveA) / totalSupplyLTK;
+        data.amountB = (liquidity * data.reserveB) / totalSupplyLTK;
 
-        _burn(msg.sender,liquidity);
+        require(data.amountA >= data.amountAMin, "amountA too low");
+        require(data.amountB >= data.amountBMin, "amountB too low");
+
+        _burn(msg.sender, liquidity);
         IERC20(data.tokenA).safeTransfer(to, data.amountA);
         IERC20(data.tokenB).safeTransfer(to, data.amountB);
 
-        reserve[data.tokenA][data.tokenB]-=data.amountA;
-        reserve[data.tokenB][data.tokenA]-=data.amountB;
+        reserve[data.tokenA][data.tokenB] -= data.amountA;
+        reserve[data.tokenB][data.tokenA] -= data.amountB;
 
-        amountA = data.amountA;
-        amountB = data.amountB;
+        amountA = data.reversed ? data.amountB : data.amountA;
+        amountB = data.reversed ? data.amountA : data.amountB;
 
-        emit LiquidityRemoved (msg.sender, to, liquidity, data.amountA, data.amountB );
+        emit LiquidityRemoved(msg.sender, to, liquidity, amountA, amountB);
+    }
 
-    }    
+    /// @notice Emitted when liquidity is removed from the pool
+    event LiquidityRemoved(address indexed from, address indexed to, uint256 liquidity, uint256 amountA, uint256 amountB);
 
-    event LiquidityRemoved (address indexed from, address indexed to, uint256 liquidity, uint256 amountA, uint256 amountB);
-
-
+    /// @notice Swaps exact tokens for another token based on the current reserve ratio
+    /// @param amountIn Amount of input tokens
+    /// @param amountOutMin Minimum amount of output tokens required
+    /// @param path Token pair involved in swap [tokenIn, tokenOut]
+    /// @param to Recipient of output tokens
+    /// @param deadline Latest valid time for this transaction
+    /// @return amounts [amountIn, amountOut] depending on token order
     function swapExactTokensForTokens(
-                            uint amountIn, 
-                            uint amountOutMin, 
-                            address[] calldata path, 
-                            address to, 
-                            uint deadline
-                            ) external 
-                            nonReentrant() 
-                            isNotExpired(deadline) 
-                            returns (uint[] memory amounts)
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    )
+        external
+        nonReentrant
+        isNotExpired(deadline)
+        returns (uint[] memory amounts)
     {
-        require(amountIn>0,"amountIn cannot be zero");
-        require(amountOutMin>0,"amountOutMin cannot be zero");
-        require(path.length==2,"At moment, the contract handle only one pair");
-        
-        TokenPairData memory data = reorderTokens(path[0],path[1]);
-        
-        require(data.reserveA > 0 && data.reserveB > 0, "Reserves are empty");
+        require(amountIn > 0, "Zero amountIn");
+        require(amountOutMin > 0, "Zero amountOutMin");
+        require(path.length == 2, "Only 1-pair swaps allowed");
 
+        TokenPairData memory data = reorderTokens(path[0], path[1]);
+
+        require(data.reserveA > 0 && data.reserveB > 0, "Empty reserves");
+
+        // Calculate output amount using constant product formula
         uint amountOut = (amountIn * data.reserveB) / (data.reserveA + amountIn);
         data.amountA = data.reversed ? amountOut : amountIn;
         data.amountB = data.reversed ? amountIn : amountOut;
 
-        require(data.amountB>= amountOutMin,"amountOut is lower than amountOutMin");
+        require(data.amountB >= amountOutMin, "Slippage exceeded");
 
         swapExactTokensForTokensTransact(data, msg.sender, to);
 
         amounts = new uint[](path.length);
-        if (data.reversed) {
-            amounts[0] = data.amountB; // amountIn del token original (path[0])
-            amounts[1] = data.amountA; // amountOut del token destino (path[1])
-        } else {
-            amounts[0] = data.amountA;
-            amounts[1] = data.amountB;
-        }
+        amounts[0] = data.reversed ? data.amountB : data.amountA;
+        amounts[1] = data.reversed ? data.amountA : data.amountB;
 
-        emit swapExecuted (msg.sender, to, path, amounts);
+        emit SwapExecuted(msg.sender, to, path, amounts);
+    }
 
-    }    
-
-
-    function reorderTokens (address tokenA, address tokenB) internal view returns (TokenPairData memory data)
-    {
-        require(tokenA != tokenB,"tokenA and tokenB cannot be iqual");
-
+    /// @dev Normalizes token order to avoid duplicate storage paths
+    function reorderTokens(address tokenA, address tokenB) internal view returns (TokenPairData memory data) {
+        require(tokenA != tokenB, "Tokens must differ");
         data.reversed = tokenA > tokenB;
-
         data.tokenA = data.reversed ? tokenB : tokenA;
         data.tokenB = data.reversed ? tokenA : tokenB;
-
-        data.reserveA = data.reversed ? reserve[data.tokenB][data.tokenA] : reserve[data.tokenA][data.tokenB];
-        data.reserveB = data.reversed ? reserve[data.tokenA][data.tokenB] : reserve[data.tokenB][data.tokenA];
-
-        
-
+        data.reserveA = reserve[data.tokenA][data.tokenB];
+        data.reserveB = reserve[data.tokenB][data.tokenA];
     }
 
-    function swapExactTokensForTokensTransact (TokenPairData memory data, address from, address to) internal
-    {
-
-        if (data.reversed)
-        {
+    /// @dev Executes internal logic for swaps based on token order
+    function swapExactTokensForTokensTransact(
+        TokenPairData memory data,
+        address from,
+        address to
+    ) internal {
+        if (data.reversed) {
             IERC20(data.tokenA).safeTransfer(to, data.amountA);
             IERC20(data.tokenB).safeTransferFrom(from, address(this), data.amountB);
-            reserve[data.tokenA][data.tokenB]-=data.amountB;           
-            reserve[data.tokenB][data.tokenA]+=data.amountA;
-        }
-        else 
-        {       
+            reserve[data.tokenA][data.tokenB] -= data.amountB;
+            reserve[data.tokenB][data.tokenA] += data.amountA;
+        } else {
             IERC20(data.tokenA).safeTransferFrom(from, address(this), data.amountA);
-            IERC20(data.tokenB).safeTransfer(to, data.amountB);                 
-            reserve[data.tokenA][data.tokenB]+=data.amountA;
-            reserve[data.tokenB][data.tokenA]-=data.amountB;
+            IERC20(data.tokenB).safeTransfer(to, data.amountB);
+            reserve[data.tokenA][data.tokenB] += data.amountA;
+            reserve[data.tokenB][data.tokenA] -= data.amountB;
         }
     }
 
-    event swapExecuted (address indexed from,  address indexed to, address[] path, uint[] amounts);
+    /// @notice Emitted when a swap is executed
+    event SwapExecuted(address indexed from, address indexed to, address[] path, uint[] amounts);
 
-
-    function getPrice(address tokenA, address tokenB) public view returns (uint price)
-    {
+    /// @notice Gets the price of tokenA in terms of tokenB
+    /// @param tokenA Address of base token
+    /// @param tokenB Address of quote token
+    /// @return price Price scaled by 1e18
+    function getPrice(address tokenA, address tokenB) public view returns (uint price) {
         uint reserveA = reserve[tokenA][tokenB];
         uint reserveB = reserve[tokenB][tokenA];
+        require(reserveA > 0 && reserveB > 0, "Insufficient reserves");
+        return (reserveB * DECIMALS_FACTOR) / reserveA;
+    }
 
-        require(reserveA>0 && reserveB>0,"not enought reserves");
+    /// @notice Estimates output amount for given input using constant product formula
+    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) external pure returns (uint amountOut) {
+        return (amountIn * reserveOut) / (reserveIn + amountIn);
+    }
 
-        return ((reserveB*DECIMALS_FACTOR)/(reserveA)); 
-     }    
-
-    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) external pure returns (uint amountOut)
-    {
-        return (amountIn*reserveOut)/(reserveIn+amountIn);
-    }       
-    //This internal function returns the square root of a number
+    /// @dev Computes integer square root using Babylonian method
     function sqrt(uint256 x) internal pure returns (uint256) {
-        if (x == 0 || x == 1) {
-            return x;
-        }
-
-        uint256 z = x / 2 + 1;
+        if (x == 0 || x == 1) return x;
+        uint256 z = (x / 2) + 1;
         uint256 y = x;
-
         while (z < y) {
             y = z;
             z = (x / z + z) / 2;
         }
-
         return y;
     }
-             
 }

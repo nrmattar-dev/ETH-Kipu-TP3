@@ -10,16 +10,17 @@ using SafeERC20 for IERC20;
 
 contract SimpleSwap is ERC20{
 
-    uint DECIMALS_FACTOR = 10**18;
-    uint MINIMUM_LIQUIDITY = 1000;    
+    uint constant DECIMALS_FACTOR = 10**18;
+    uint constant MINIMUM_LIQUIDITY = 1000;    
     bool locked;
-    struct DataForSwap {
+    struct TokenPairData {
         address tokenA;
         address tokenB;
         uint reserveA;
         uint reserveB;
         uint amountA;
         uint amountB;
+        bool reversed;
     }
 
     mapping(address => mapping(address => uint)) public reserve;
@@ -61,43 +62,50 @@ contract SimpleSwap is ERC20{
        
         require(amountADesired>=amountAMin,"amountAMin must be less than or equal to amountADesired");
         require(amountBDesired>=amountBMin,"amountBMin must be less than or equal to amountBDesired");
-        require(tokenA < tokenB, "Token order must be canonical");
+        
+        TokenPairData memory data = reorderTokens(tokenA,tokenB);
     
-        uint reserveA = reserve[tokenA][tokenB];
-        uint reserveB = reserve[tokenB][tokenA];
+        data.reserveA = reserve[data.tokenA][data.tokenB];
+        data.reserveB = reserve[data.tokenB][data.tokenA];
+
         bool isInitialLiquidity = false;
 
-        require((reserveA == 0 && reserveB == 0) || (reserveA > 0 && reserveB > 0), "Invalid reserve amount");
+        require((data.reserveA == 0 && data.reserveB == 0) || (data.reserveA > 0 && data.reserveB > 0), "Invalid reserve amount");
 
-         if (reserveA==0 && reserveB==0)
+         if (data.reserveA==0 && data.reserveB==0)
         {
-            amountA = amountADesired;
-            amountB = amountBDesired;
+            data.amountA = amountADesired;
+            data.amountB = amountBDesired;
             isInitialLiquidity = true;
-            liquidity = calculateInitialLiquidity(amountA,amountB);            
+
+            liquidity = calculateInitialLiquidity(data);  
+
         }
         else 
         {
-            amountB = amountBDesired;
-            amountA = amountBDesired * reserveA / reserveB;
+            data.amountB = amountBDesired;
+            data.amountA = amountBDesired * data.reserveA / data.reserveB;
 
-            if ((amountA < amountAMin) || (amountA > amountADesired))
+            if ((data.amountA < amountAMin) || (data.amountA > amountADesired))
             {
-                amountA = amountADesired;
-                amountB = amountADesired * reserveB / reserveA;
+                data.amountA = amountADesired;
+                data.amountB = amountADesired * data.reserveB / data.reserveA;
 
                 require(
-                        (amountB >= amountBMin)
+                        (data.amountB >= amountBMin)
                         && 
-                        (amountB <= amountBDesired)
+                        (data.amountB <= amountBDesired)
                         ,"The output do not satisfy the input requirements");
 
             }
             
-            liquidity = calculateExistingLiquidity(amountA, reserveA, amountB, reserveB);
+            liquidity = calculateExistingLiquidity(data);
         }
 
-        addLiquidityTransact(tokenA,tokenB,msg.sender, to,amountA, amountB,liquidity,isInitialLiquidity);
+        addLiquidityTransact(msg.sender, to, data, liquidity, isInitialLiquidity);
+
+        amountA = data.amountA;
+        amountB = data.amountB;
 
         return (amountA,amountB,liquidity);
 
@@ -105,18 +113,15 @@ contract SimpleSwap is ERC20{
 
     event LiquidityAdded (address indexed from, address indexed to, uint amountA, uint amountB, uint liquidity);
 
-    function addLiquidityTransact ( address tokenA,
-                                    address tokenB,
-                                    address from,
+    function addLiquidityTransact ( address from,
                                     address to,
-                                    uint amountA,
-                                    uint amountB,
+                                    TokenPairData memory data,
                                     uint liquidity, 
                                     bool isInitialLiquidity
                                     ) internal
     {
-        IERC20(tokenA).safeTransferFrom(from, address(this), amountA);
-        IERC20(tokenB).safeTransferFrom(from, address(this), amountB);
+        IERC20(data.tokenA).safeTransferFrom(from, address(this), data.amountA);
+        IERC20(data.tokenB).safeTransferFrom(from, address(this), data.amountB);
 
         _mint(to, liquidity);
 
@@ -125,23 +130,23 @@ contract SimpleSwap is ERC20{
             _mint(address(this), MINIMUM_LIQUIDITY); 
         }      
 
-        reserve[tokenA][tokenB]+=amountA;
-        reserve[tokenB][tokenA]+=amountB;        
+        reserve[data.tokenA][data.tokenB]+=data.amountA;
+        reserve[data.tokenB][data.tokenA]+=data.amountB;        
 
-        emit LiquidityAdded (from, to, amountA, amountB, liquidity);
+        emit LiquidityAdded (from, to, data.amountA, data.amountB, liquidity);
     }
 
-    function calculateInitialLiquidity(uint amountA, uint amountB) internal view returns (uint liquidity)
+    function calculateInitialLiquidity(TokenPairData memory data) internal pure returns (uint liquidity)
     {
-            liquidity = sqrt(amountA*amountB) - MINIMUM_LIQUIDITY;
+            liquidity = sqrt(data.amountA*data.amountB) - MINIMUM_LIQUIDITY;
             require(liquidity > 0,"The amounts must be higher");
     }
 
-    function calculateExistingLiquidity(uint amountA, uint reserveA, uint amountB, uint reserveB) internal view returns (uint liquidity)
+    function calculateExistingLiquidity(TokenPairData memory data) internal view returns (uint liquidity)
     {
             uint256 totalSupplyLTK = totalSupply();
-            uint256 liquidityA = amountA * totalSupplyLTK / reserveA;
-            uint256 liquidityB = amountB * totalSupplyLTK / reserveB;
+            uint256 liquidityA = data.amountA * totalSupplyLTK / data.reserveA;
+            uint256 liquidityB = data.amountB * totalSupplyLTK / data.reserveB;
             liquidity = (liquidityA < liquidityB) ? liquidityA : liquidityB;
         
     }
@@ -160,51 +165,34 @@ contract SimpleSwap is ERC20{
                                             uint amountA, 
                                             uint amountB)
     {
-        require(tokenA != tokenB,"tokenA and tokenB cannot be iqual");
         require(liquidity > 0, "Cannot remove zero liquidity");
-        require(tokenA < tokenB, "Token order must be canonical");
+        
+        TokenPairData memory data = reorderTokens(tokenA,tokenB);
 
         uint256 totalSupplyLTK = totalSupply();
         
-        uint reserveA = reserve[tokenA][tokenB];
-        uint reserveB = reserve[tokenB][tokenA];
+        data.amountA = liquidity*data.reserveA/totalSupplyLTK;
+        data.amountB = liquidity*data.reserveB/totalSupplyLTK;
 
-        amountA = liquidity*reserveA/totalSupplyLTK;
-        amountB = liquidity*reserveB/totalSupplyLTK;
-
-        require(amountA >= amountAMin,"amountA is lower than amountAMin");
-        require(amountB >= amountBMin,"amountB is lower than amountBMin");
+        require(data.amountA >= amountAMin,"amountA is lower than amountAMin");
+        require(data.amountB >= amountBMin,"amountB is lower than amountBMin");
 
         _burn(msg.sender,liquidity);
-        IERC20(tokenA).safeTransfer(to, amountA);
-        IERC20(tokenB).safeTransfer(to, amountB);
+        IERC20(data.tokenA).safeTransfer(to, data.amountA);
+        IERC20(data.tokenB).safeTransfer(to, data.amountB);
 
-        reserve[tokenA][tokenB]-=amountA;
-        reserve[tokenB][tokenA]-=amountB;
+        reserve[data.tokenA][data.tokenB]-=data.amountA;
+        reserve[data.tokenB][data.tokenA]-=data.amountB;
 
-        emit LiquidityRemoved (msg.sender, to, liquidity, amountA, amountB );
+        amountA = data.amountA;
+        amountB = data.amountB;
+
+        emit LiquidityRemoved (msg.sender, to, liquidity, data.amountA, data.amountB );
 
     }    
 
     event LiquidityRemoved (address indexed from, address indexed to, uint256 liquidity, uint256 amountA, uint256 amountB);
 
-    function reorderTokensForSwap (address[] calldata path, uint amountIn) internal view returns (DataForSwap memory swap)
-    {
-        require(path[0] != path[1],"tokenA and tokenB cannot be iqual");
-
-        bool reversed = path[0] > path[1];
-
-        swap.tokenA = reversed ? path[1] : path[0];
-        swap.tokenB = reversed ? path[0] : path[1];
-
-        swap.reserveA = reversed ? reserve[swap.tokenB][swap.tokenA] : reserve[swap.tokenA][swap.tokenB];
-        swap.reserveB = reversed ? reserve[swap.tokenA][swap.tokenB] : reserve[swap.tokenB][swap.tokenA];
-
-        require(swap.reserveA > 0 && swap.reserveB > 0, "Reserves are empty");
-
-        swap.amountA = amountIn;
-        swap.amountB = (amountIn * swap.reserveB) / (swap.reserveA + amountIn);
-    }
 
     function swapExactTokensForTokens(
                             uint amountIn, 
@@ -221,27 +209,65 @@ contract SimpleSwap is ERC20{
         require(amountOutMin>0,"amountOutMin cannot be zero");
         require(path.length==2,"At moment, the contract handle only one pair");
         
-        DataForSwap memory swap = reorderTokensForSwap(path, amountIn);
+        TokenPairData memory data = reorderTokens(path[0],path[1]);
         
-        require(swap.amountB>= amountOutMin,"amountOut is lower than amountOutMin");
+        require(data.reserveA > 0 && data.reserveB > 0, "Reserves are empty");
 
-        swapExactTokensForTokensTransact(swap, msg.sender, to);
+        uint amountOut = (amountIn * data.reserveB) / (data.reserveA + amountIn);
+        data.amountA = data.reversed ? amountOut : amountIn;
+        data.amountB = data.reversed ? amountIn : amountOut;
+
+        require(data.amountB>= amountOutMin,"amountOut is lower than amountOutMin");
+
+        swapExactTokensForTokensTransact(data, msg.sender, to);
 
         amounts = new uint[](path.length);
-        amounts[0] = swap.amountA;
-        amounts[1] = swap.amountB;
+        if (data.reversed) {
+            amounts[0] = data.amountB; // amountIn del token original (path[0])
+            amounts[1] = data.amountA; // amountOut del token destino (path[1])
+        } else {
+            amounts[0] = data.amountA;
+            amounts[1] = data.amountB;
+        }
 
         emit swapExecuted (msg.sender, to, path, amounts);
 
     }    
 
-    function swapExactTokensForTokensTransact (DataForSwap memory swap, address from, address to) internal
+
+    function reorderTokens (address tokenA, address tokenB) internal view returns (TokenPairData memory data)
     {
-        IERC20(swap.tokenA).safeTransferFrom(from, address(this), swap.amountA);
-        IERC20(swap.tokenB).safeTransfer(to, swap.amountB);
+        require(tokenA != tokenB,"tokenA and tokenB cannot be iqual");
+
+        data.reversed = tokenA > tokenB;
+
+        data.tokenA = data.reversed ? tokenB : tokenA;
+        data.tokenB = data.reversed ? tokenA : tokenB;
+
+        data.reserveA = data.reversed ? reserve[data.tokenB][data.tokenA] : reserve[data.tokenA][data.tokenB];
+        data.reserveB = data.reversed ? reserve[data.tokenA][data.tokenB] : reserve[data.tokenB][data.tokenA];
+
         
-        reserve[swap.tokenA][swap.tokenB]+=swap.amountA;
-        reserve[swap.tokenB][swap.tokenA]-=swap.amountB;
+
+    }
+
+    function swapExactTokensForTokensTransact (TokenPairData memory data, address from, address to) internal
+    {
+
+        if (data.reversed)
+        {
+            IERC20(data.tokenA).safeTransfer(to, data.amountA);
+            IERC20(data.tokenB).safeTransferFrom(from, address(this), data.amountB);
+            reserve[data.tokenA][data.tokenB]-=data.amountB;           
+            reserve[data.tokenB][data.tokenA]+=data.amountA;
+        }
+        else 
+        {       
+            IERC20(data.tokenA).safeTransferFrom(from, address(this), data.amountA);
+            IERC20(data.tokenB).safeTransfer(to, data.amountB);                 
+            reserve[data.tokenA][data.tokenB]+=data.amountA;
+            reserve[data.tokenB][data.tokenA]-=data.amountB;
+        }
     }
 
     event swapExecuted (address indexed from,  address indexed to, address[] path, uint[] amounts);

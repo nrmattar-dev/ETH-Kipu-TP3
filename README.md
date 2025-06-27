@@ -1,5 +1,11 @@
 # SimpleSwap Contract - ETH Kipu TP Nº3 by Nahuel Ruiz Mattar  
 
+SimpleSwap Address: https://sepolia.etherscan.io/address/0x189E5ABAC389D37F9afc573a3549a00dF6feb41b#code
+
+Thurisaz (Token) Address: https://sepolia.etherscan.io/address/0x2966F7783663538a1265B44d4956E2e016Fc83c6#code
+
+Uruz (Token) Address: https://sepolia.etherscan.io/address/0x29e740c900e173EAA854818343edd9b4bE75fd41#code
+
 ---
 
 ## 🧠 Project Overview

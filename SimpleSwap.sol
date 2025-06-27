@@ -137,9 +137,6 @@ contract SimpleSwap is ERC20 {
         amountB = data.reversed ? data.amountA : data.amountB;
     }
 
-    /// @notice Emitted when liquidity is added to the pool
-    event LiquidityAdded(address indexed from, address indexed to, uint amountA, uint amountB, uint liquidity);
-
     /// @dev Executes token transfers and liquidity minting during liquidity provision.
     ///      Extracted into a separate function to avoid "Stack too deep" compiler errors.
     function addLiquidityTransact(
@@ -161,8 +158,11 @@ contract SimpleSwap is ERC20 {
         reserve[data.tokenA][data.tokenB] += data.amountA;
         reserve[data.tokenB][data.tokenA] += data.amountB;
 
-        emit LiquidityAdded(from, to, data.amountA, data.amountB, liquidity);
+        emit LiquidityAdded(from, to, data.tokenA, data.tokenB, data.amountA, data.amountB, liquidity);
     }
+
+    /// @notice Emitted when liquidity is added to the pool
+    event LiquidityAdded(address indexed from, address indexed to, address tokenA, address TokenB, uint amountA, uint amountB, uint liquidity);    
 
     /// @dev Computes liquidity to mint for new pool
     ///      Extracted into a separate function to avoid "Stack too deep" compiler errors.
@@ -241,11 +241,11 @@ contract SimpleSwap is ERC20 {
         amountB = data.reversed ? data.amountA : data.amountB;
 
         // Emit an event to log the liquidity removal.
-        emit LiquidityRemoved(msg.sender, to, liquidity, amountA, amountB);
+        emit LiquidityRemoved(msg.sender, to, liquidity, data.tokenA, data.tokenB, amountA, amountB);
     }
 
     /// @notice Emitted when liquidity is removed from the pool
-    event LiquidityRemoved(address indexed from, address indexed to, uint256 liquidity, uint256 amountA, uint256 amountB);
+    event LiquidityRemoved(address indexed from, address indexed to, uint256 liquidity, address tokenA, address TokenB, uint256 amountA, uint256 amountB);
 
     /// @notice Swaps exact tokens for another token based on the current reserve ratio
     /// @param amountIn Amount of input tokens

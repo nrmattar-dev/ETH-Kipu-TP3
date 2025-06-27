@@ -17,7 +17,7 @@ contract SimpleSwap is ERC20 {
     /// @dev Used to scale prices to 18 decimals (standard for ERC20)
     uint constant DECIMALS_FACTOR = 10**18;
 
-    /// @dev Minimum liquidity locked in the pool to avoid divide-by-zero scenarios. SwapVerifier do not contemplate this. So, I leave it with zero.
+    /// @dev Minimum liquidity locked in the pool to avoid divide-by-zero scenarios. As SwapVerifier do not contemplate this, it will be zero.
     uint constant MINIMUM_LIQUIDITY = 0;
 
     /// @dev Used for nonReentrancy modifier
@@ -132,6 +132,7 @@ contract SimpleSwap is ERC20 {
         // Transfer tokens and mint liquidity tokens
         addLiquidityTransact(msg.sender, to, data, liquidity, isInitialLiquidity);
 
+        // If tokens were internally reordered, restore output values to match original path order.
         amountA = data.reversed ? data.amountB : data.amountA;
         amountB = data.reversed ? data.amountA : data.amountB;
     }
@@ -139,7 +140,8 @@ contract SimpleSwap is ERC20 {
     /// @notice Emitted when liquidity is added to the pool
     event LiquidityAdded(address indexed from, address indexed to, uint amountA, uint amountB, uint liquidity);
 
-    /// @dev Internal helper to handle token transfers and minting liquidity
+    /// @dev Executes token transfers and liquidity minting during liquidity provision.
+    ///      Extracted into a separate function to avoid "Stack too deep" compiler errors.
     function addLiquidityTransact(
         address from,
         address to,
@@ -163,12 +165,14 @@ contract SimpleSwap is ERC20 {
     }
 
     /// @dev Computes liquidity to mint for new pool
+    ///      Extracted into a separate function to avoid "Stack too deep" compiler errors.
     function calculateInitialLiquidity(TokenPairData memory data) internal pure returns (uint liquidity) {
         liquidity = sqrt(data.amountA * data.amountB) - MINIMUM_LIQUIDITY;
         require(liquidity > 0, "Liquidity too low");
     }
 
     /// @dev Computes liquidity for existing pool based on proportional contribution
+    ///      Extracted into a separate function to avoid "Stack too deep" compiler errors.
     function calculateExistingLiquidity(TokenPairData memory data) internal view returns (uint liquidity) {
         uint256 totalSupplyLTK = totalSupply();
         uint256 liquidityA = (data.amountA * totalSupplyLTK) / data.reserveA;
@@ -200,30 +204,43 @@ contract SimpleSwap is ERC20 {
         isNotExpired(deadline)
         returns (uint amountA, uint amountB)
     {
+        // Ensure the user is not trying to remove zero liquidity.
         require(liquidity > 0, "Zero liquidity");
 
+        // Normalize token order and fetch reserves; also determine if input was reversed.
         TokenPairData memory data = reorderTokens(tokenA, tokenB);
+
+        // Adjust minimum amounts based on whether the original token order was reversed.
         data.amountAMin = data.reversed ? amountBMin : amountAMin;
         data.amountBMin = data.reversed ? amountAMin : amountBMin;
 
+        // Get the total supply of liquidity tokens to calculate proportional amounts.
         uint256 totalSupplyLTK = totalSupply();
 
+        // Calculate the amount of each token to withdraw, proportional to the user's liquidity.
         data.amountA = (liquidity * data.reserveA) / totalSupplyLTK;
         data.amountB = (liquidity * data.reserveB) / totalSupplyLTK;
 
+        // Ensure the withdrawn amounts meet the minimum thresholds set by the user.
         require(data.amountA >= data.amountAMin, "amountA too low");
         require(data.amountB >= data.amountBMin, "amountB too low");
 
+        // Burn the user's liquidity tokens.
         _burn(msg.sender, liquidity);
+
+        // Transfer the corresponding token amounts to the recipient.
         IERC20(data.tokenA).safeTransfer(to, data.amountA);
         IERC20(data.tokenB).safeTransfer(to, data.amountB);
 
+        // Update internal reserves to reflect the removed liquidity.
         reserve[data.tokenA][data.tokenB] -= data.amountA;
         reserve[data.tokenB][data.tokenA] -= data.amountB;
 
+        // Restore the original token order in the returned values.
         amountA = data.reversed ? data.amountB : data.amountA;
         amountB = data.reversed ? data.amountA : data.amountB;
 
+        // Emit an event to log the liquidity removal.
         emit LiquidityRemoved(msg.sender, to, liquidity, amountA, amountB);
     }
 
@@ -321,7 +338,7 @@ contract SimpleSwap is ERC20 {
         return (amountIn * reserveOut) / (reserveIn + amountIn);
     }
 
-    /// @dev Computes integer square root using Babylonian method
+    /// @dev Computes integer square root using Babylonian method to follow Uniswap documentation
     function sqrt(uint256 x) internal pure returns (uint256) {
         if (x == 0 || x == 1) return x;
         uint256 z = (x / 2) + 1;
